@@ -31,6 +31,7 @@ import (
 
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/pkg/errors"
+	"helm.sh/helm/v3/pkg/release"
 	batch "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -476,7 +477,18 @@ func delete(c *Client, resources ResourceList, propagation metav1.DeletionPropag
 	mtx := sync.Mutex{}
 	err := perform(resources, func(info *resource.Info) error {
 		c.Log("Starting delete for %q %s", info.Name, info.Mapping.GroupVersionKind.Kind)
-		err := deleteResource(info, propagation)
+		object, err := resource.NewHelper(info.Client, info.Mapping).WithFieldManager(getManagedFieldsManager()).Get(info.Namespace, info.Name)
+		if err != nil {
+			return err
+		}
+		annotations, err := metadataAccessor.Annotations(object)
+		if err != nil {
+			return err
+		}
+		if prop := validPropagation(annotations); prop != "" {
+			propagation = metav1.DeletionPropagation(prop)
+		}
+		err = deleteResource(info, propagation)
 		if err == nil || apierrors.IsNotFound(err) {
 			if err != nil {
 				c.Log("Ignoring delete failure for %q %s: %v", info.Name, info.Mapping.GroupVersionKind, err)
@@ -841,4 +853,20 @@ func (c *Client) WaitAndGetCompletedPodPhase(name string, timeout time.Duration)
 	}
 
 	return v1.PodUnknown, err
+}
+
+func validPropagation(annotation map[string]string) string {
+	if propagation, ok := annotation[release.HookDeletePropagationAnnotation]; ok {
+		switch propagation {
+		case string(metav1.DeletePropagationBackground):
+			return string(metav1.DeletePropagationBackground)
+		case string(metav1.DeletePropagationForeground):
+			return string(metav1.DeletePropagationForeground)
+		case string(metav1.DeletePropagationOrphan):
+			return string(metav1.DeletePropagationOrphan)
+		default:
+			return ""
+		}
+	}
+	return ""
 }
